@@ -112,6 +112,29 @@ impl Rspack {
   }
 
   #[napi]
+  pub async unsafe fn rebuild(
+    &mut self,
+    modified_files: Vec<String>,
+    removed_files: Vec<String>,
+  ) -> Result<()> {
+    if let Some(runner_ref) = self.js_loader_runner.as_ref() {
+      let runner = create_js_loader_runner(Arc::clone(runner_ref));
+      self.compiler.set_js_loader_runner(Some(runner));
+    }
+
+    if let Some(adapter_ref) = self.js_hooks_adapter.as_ref() {
+      let adapter = create_js_hooks_adapter(Arc::clone(adapter_ref));
+      self.compiler.set_js_hooks_adapter(Some(adapter));
+    }
+
+    self
+      .compiler
+      .rebuild(modified_files, removed_files)
+      .await
+      .map_err(Error::from_reason)
+  }
+
+  #[napi]
   pub fn get_file_dependencies(&self) -> Vec<String> {
     self.compiler.file_dependencies()
   }

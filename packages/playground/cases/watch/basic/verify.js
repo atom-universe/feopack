@@ -45,12 +45,14 @@ module.exports = function verify(config) {
 
       if (buildCount === 1) {
         assert.match(bundle, /watch-v1/)
+        assert.match(bundle, /unchanged/)
         fs.writeFileSync(sourcePath, "export const message = 'watch-v2'\n")
         return
       }
 
       try {
         assert.match(bundle, /watch-v2/)
+        assert.match(bundle, /unchanged/)
         assert.ok(
           compiler.modifiedFiles?.has(sourcePath),
           `modified files: ${[...(compiler.modifiedFiles ?? [])].join(', ')}`,

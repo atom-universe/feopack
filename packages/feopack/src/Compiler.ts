@@ -122,8 +122,16 @@ export class Compiler {
   async #build() {
     // rust, 启动！
     const inner = this.#getInner()
+    const isRebuild = this.compilation !== undefined
     this.compilation = new Compilation(this, inner)
-    await inner.build()
+    if (isRebuild) {
+      await inner.rebuild(
+        Array.from(this.modifiedFiles ?? []),
+        Array.from(this.removedFiles ?? []),
+      )
+    } else {
+      await inner.build()
+    }
     return this.compilation
   }
 

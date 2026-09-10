@@ -16,12 +16,21 @@ impl Compilation {
    * TODO: 等我完全处理好了基本的打包流程后，再回头看下 rspack 是怎么做的
    */
   pub(crate) async fn build_module_graph(&mut self) -> Result<(), String> {
+    let invalidated = self
+      .module_graph
+      .module_ids_for_resources(self.modified_files.iter().chain(self.removed_files.iter()));
+    let affected = self.module_graph.affected_modules(invalidated);
+    self.build_stats.invalidated_modules = affected.len();
+
+    for module_id in affected {
+      self.module_graph.remove_module(&module_id);
+      self.module_sources.remove(&module_id);
+    }
+
     let context = Path::new(&self.options.context);
     println!("========\ncontext: {:?}\n", context);
     let entry_module_path = context.join(&self.options.entry);
-    // id 其实就是 stringfied module path
-    // 为什么要这么做呢？因为这里有 virtual import 等情况，会带 query 参数，形如 /abs/xxx?yyy=123 这样
-    // 而这些事非标准的 Path，无法被 OS File Sys 解析，所以不能用 Pathbuf
+    // 入口没有查询参数或内联 loader，它的模块 ID 暂时等于规范化路径。
     let entry_module_id = Self::create_module_id(&entry_module_path)?;
     println!("========\nentry_path: {:?}\n", entry_module_id);
 
@@ -37,12 +46,32 @@ impl Compilation {
       }
       visited.insert(module_id.clone());
 
-      // 构建一个 module 内部依赖的其他 modules
-      let dep_module_ids = self.build_module(module_id).await?;
-      for dep_module_path in dep_module_ids {
-        module_id_queue.push_back(dep_module_path);
+      let dependency_ids = if let Some(module) = self.module_graph.get_module(&module_id) {
+        self.build_stats.reused_modules += 1;
+        module.local_dependency_ids.clone()
+      } else {
+        self.build_stats.rebuilt_modules += 1;
+        self.build_module(module_id).await?
+      };
+
+      for dependency_id in dependency_ids {
+        module_id_queue.push_back(dependency_id);
       }
     }
+
+    // 从入口重新走一遍可达性，顺便清理依赖删除后留下的孤立模块。
+    self.module_graph.retain_modules(&visited);
+    self
+      .module_sources
+      .retain(|module_id, _| self.module_graph.has_module(module_id));
+    self.file_dependencies = self.module_graph.resource_paths().cloned().collect();
+
+    println!(
+      "[Rust Make] 失效模块：{}，重新构建：{}，复用：{}",
+      self.build_stats.invalidated_modules,
+      self.build_stats.rebuilt_modules,
+      self.build_stats.reused_modules
+    );
 
     Ok(())
   }
@@ -66,8 +95,8 @@ impl Compilation {
 
     // 字面意思，也就是依赖的模块
     // external 和 internal 的区别就是，后者进入 module graph，会参与打包，而前者不会——知道这个原理，实现 external 就方便了
-    let mut dep_modules = Vec::new();
-    let mut dep_module_paths = Vec::new();
+    let mut dependency_requests = Vec::new();
+    let mut local_dependency_ids = Vec::new();
 
     let Program::Module(module) = ast else {
       return Err("不支持 Script 模式".into());
@@ -81,13 +110,13 @@ impl Compilation {
       if let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item {
         if let Some(dep) = import.src.value.as_str() {
           let dep = dep.to_string();
-          dep_modules.push(dep.clone());
+          dependency_requests.push(dep.clone());
 
           // external 依赖只记录在 dependencies 中，不进入本地构建队列。
           if let ResolvedPath::File(resolved_module) =
             Self::resolve_path(&dep, module_dir, context)?
           {
-            dep_module_paths.push(resolved_module.module_id);
+            local_dependency_ids.push(resolved_module.module_id);
           }
         }
       }
@@ -99,12 +128,15 @@ impl Compilation {
       .module_sources
       .insert(create_data.module_id.clone(), source);
 
-    let module = Module::new(create_data.module_id.clone(), Some(dep_modules));
-    self
-      .module_graph
-      .add_single_module(create_data.module_id, module);
+    let module = Module::new(
+      create_data.module_id,
+      Self::normalize_path(&module_path)?,
+      dependency_requests,
+      local_dependency_ids.clone(),
+    );
+    self.module_graph.add_module(module);
 
-    Ok(dep_module_paths)
+    Ok(local_dependency_ids)
   }
 
   async fn load_module_source(

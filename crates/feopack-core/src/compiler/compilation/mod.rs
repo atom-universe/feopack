@@ -48,6 +48,13 @@ pub struct GeneratedAsset {
   pub source: String,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct BuildStats {
+  pub(crate) invalidated_modules: usize,
+  pub(crate) rebuilt_modules: usize,
+  pub(crate) reused_modules: usize,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct CodegenModule {
   // code_generation 阶段消费的临时结构：
@@ -85,6 +92,9 @@ pub struct Compilation {
   pub(crate) file_source_cache: HashMap<PathBuf, String>,
   pub(crate) loader_registry: LoaderRegistry,
   pub(crate) normal_module_factory: NormalModuleFactory,
+  pub(crate) modified_files: HashSet<PathBuf>,
+  pub(crate) removed_files: HashSet<PathBuf>,
+  pub(crate) build_stats: BuildStats,
   #[allow(dead_code)]
   pub(crate) js_loader_runner: Option<JsLoaderRunner>,
 }
@@ -116,7 +126,35 @@ impl Compilation {
       file_source_cache: HashMap::new(),
       loader_registry,
       normal_module_factory: NormalModuleFactory::new(),
+      modified_files: HashSet::new(),
+      removed_files: HashSet::new(),
+      build_stats: BuildStats::default(),
       js_loader_runner,
     }
+  }
+
+  pub(crate) fn reuse_build_state(
+    &mut self,
+    previous: &mut Compilation,
+    modified_files: Vec<String>,
+    removed_files: Vec<String>,
+  ) -> Result<(), String> {
+    self.module_graph = std::mem::take(&mut previous.module_graph);
+    self.module_sources = std::mem::take(&mut previous.module_sources);
+
+    // file_source_cache 只属于一次 Compilation。跨轮复用的是已经完成
+    // loader 和解析的模块结果，而不是未经校验的磁盘内容。
+    self.modified_files = modified_files
+      .into_iter()
+      .map(PathBuf::from)
+      .map(|path| Self::normalize_path(&path))
+      .collect::<Result<_, _>>()?;
+    self.removed_files = removed_files
+      .into_iter()
+      .map(PathBuf::from)
+      .map(|path| Self::normalize_path(&path))
+      .collect::<Result<_, _>>()?;
+
+    Ok(())
   }
 }

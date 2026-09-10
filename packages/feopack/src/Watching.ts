@@ -1,6 +1,6 @@
 /**
  * 简化自 Rspack 的 Watching：保留事件聚合、构建中失效和串行重建，
- * 暂时监听 Compilation 实际读取的文件，并且每次都执行完整 compilation。
+ * 暂时只监听 Compilation 实际读取的文件。
  */
 import path from 'node:path'
 // Watchpack 是 webpack/Rspack 用的文件监听库
@@ -130,8 +130,7 @@ export class Watching {
     this.#running = true
     this.#invalid = false
     this.#invalidReported = false
-    // 删除文件会影响 resolve 和 missing dependencies，不能当作普通内容修改处理。
-    // 目前 Rust 侧仍是完整重建，但先保留这两个集合，为后续增量重建传递准确语义。
+    // 删除文件会影响 resolve，不能当作普通内容修改处理。
     this.compiler.modifiedFiles = new Set(this.#changedFiles)
     this.compiler.removedFiles = new Set(this.#removedFiles)
     this.#changedFiles.clear()

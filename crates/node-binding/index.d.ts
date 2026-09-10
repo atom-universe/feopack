@@ -26,6 +26,7 @@ export interface RawOptions {
 export declare class Rspack {
   constructor(options: RawOptions, jsLoaderRunner?: (ctx: JsLoaderContextInput) => Promise<JsLoaderResultOutput>, jsHooksAdapter?: (event: JsCompilerHookEventInput) => Promise<void>)
   build(): Promise<void>
+  rebuild(modifiedFiles: Array<string>, removedFiles: Array<string>): Promise<void>
   getFileDependencies(): Array<string>
 }
 

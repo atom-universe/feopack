@@ -82,6 +82,21 @@ impl Compiler {
     Ok(())
   }
 
+  pub async fn rebuild(
+    &mut self,
+    modified_files: Vec<String>,
+    removed_files: Vec<String>,
+  ) -> Result<(), String> {
+    let mut next_compilation =
+      Compilation::new(self.options.clone(), self.js_loader_runner.clone());
+    next_compilation.reuse_build_state(&mut self.compilation, modified_files, removed_files)?;
+    self.compilation = next_compilation;
+
+    self.compile().await?;
+    self.compile_done().await?;
+    Ok(())
+  }
+
   async fn compile(&mut self) -> Result<(), String> {
     self.build_module_graph().await?;
     self.compilation.seal().await?;
@@ -135,6 +150,7 @@ mod tests {
   use super::Compiler;
   use std::path::Path;
   use std::sync::{Arc, Mutex};
+  use std::time::{SystemTime, UNIX_EPOCH};
 
   fn test_compiler() -> Compiler {
     Compiler::new(CompilationOptions {
@@ -215,5 +231,81 @@ mod tests {
         .expect("should_emit should pass"),
       Some(false)
     );
+  }
+
+  #[test]
+  fn rebuild_reuses_an_unaffected_branch() {
+    let suffix = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .expect("clock should be after unix epoch")
+      .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+      "feopack-incremental-{}-{suffix}",
+      std::process::id()
+    ));
+    let src = root.join("src");
+    std::fs::create_dir_all(&src).expect("create fixture directory");
+    std::fs::write(
+      src.join("index.js"),
+      "import { feature } from './feature.js'; import { stable } from './stable.js'; console.log(feature, stable);",
+    )
+    .expect("write entry");
+    std::fs::write(
+      src.join("feature.js"),
+      "import { leaf } from './leaf.js'; export const feature = leaf;",
+    )
+    .expect("write feature");
+    std::fs::write(src.join("leaf.js"), "export const leaf = 'v1';").expect("write leaf");
+    std::fs::write(src.join("stable.js"), "export const stable = 'stable';").expect("write stable");
+
+    let mut compiler = Compiler::new(CompilationOptions {
+      entry: "src/index.js".to_string(),
+      mode: "development".to_string(),
+      context: root.to_string_lossy().into_owned(),
+      output: Output {
+        path: root.join("dist").to_string_lossy().into_owned(),
+        filename: "main.js".to_string(),
+      },
+      module_rules: Vec::new(),
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .expect("create tokio runtime");
+
+    runtime.block_on(compiler.build()).expect("initial build");
+    std::fs::write(src.join("leaf.js"), "export const leaf = 'v2';").expect("update leaf");
+    runtime
+      .block_on(compiler.rebuild(
+        vec![src.join("leaf.js").to_string_lossy().into_owned()],
+        Vec::new(),
+      ))
+      .expect("incremental rebuild");
+
+    assert_eq!(compiler.compilation.build_stats.invalidated_modules, 3);
+    assert_eq!(compiler.compilation.build_stats.rebuilt_modules, 3);
+    assert_eq!(compiler.compilation.build_stats.reused_modules, 1);
+    let bundle = std::fs::read_to_string(root.join("dist/main.js")).expect("read bundle");
+    assert!(bundle.contains("v2"));
+    assert!(bundle.contains("stable"));
+
+    std::fs::write(
+      src.join("feature.js"),
+      "export const feature = 'without leaf';",
+    )
+    .expect("remove leaf import");
+    runtime
+      .block_on(compiler.rebuild(
+        vec![src.join("feature.js").to_string_lossy().into_owned()],
+        Vec::new(),
+      ))
+      .expect("rebuild after dependency removal");
+
+    let leaf_id = src.join("leaf.js").to_string_lossy().into_owned();
+    assert!(!compiler.compilation.module_graph.has_module(&leaf_id));
+    let bundle = std::fs::read_to_string(root.join("dist/main.js")).expect("read rebuilt bundle");
+    assert!(!bundle.contains("v2"));
+
+    std::fs::remove_dir_all(root).expect("remove fixture directory");
   }
 }
