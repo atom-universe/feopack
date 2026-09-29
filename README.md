@@ -33,6 +33,9 @@ pnpm i
 这里用 just 作为命令管理器封装了脚本，最终直接用 pkg script 即可使用：
 
 ```bash
+# 在新机器上跑才发现 just 不是 npm 包...
+brew install just
+
 # 全量构建
 pnpm run build
 
